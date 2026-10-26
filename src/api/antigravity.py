@@ -18,6 +18,7 @@ from config import (
     get_auto_ban_error_codes,
     get_request_log_enabled,
     get_request_log_error_codes,
+    get_return_thoughts_to_frontend,
 )
 from log import log
 
@@ -28,6 +29,7 @@ from src.credential_manager import (
 from src.httpx_client import stream_post_async, post_async
 from src.models import Model, model_to_dict
 from src.utils import ANTIGRAVITY_USER_AGENT
+from src.thought_filter import filter_sse_chunk, filter_response_bytes
 
 # 导入共同的基础功能
 from src.api.utils import (
@@ -316,6 +318,7 @@ async def stream_request(
         Response对象（错误时）或 bytes流/str流（成功时）
     """
     model_name = body.get("model", "")
+    return_thoughts = await get_return_thoughts_to_frontend()
 
     # 请求日志：开始时间与基础条目（成功/失败均会记录一次）
     log_entry = _base_log_entry(model_name, "", True, log_ctx)
@@ -543,6 +546,9 @@ async def stream_request(
                     else:
                         log.debug(f"[ANTIGRAVITY STREAM RAW] chunk(str): {chunk}")
 
+                    # 开关关闭时剔除思考片段（后端不遵守 includeThoughts）
+                    if not return_thoughts:
+                        chunk = filter_sse_chunk(chunk)
                     yield chunk
 
             # 流式请求完成，检查结果
@@ -654,6 +660,7 @@ async def non_stream_request(
         Response对象
     """
     model_name = body.get("model", "")
+    return_thoughts = await get_return_thoughts_to_frontend()
 
     # 请求日志：开始时间与基础条目（成功/失败均会记录一次）
     log_entry = _base_log_entry(model_name, "", False, log_ctx)
@@ -818,8 +825,12 @@ async def non_stream_request(
                     # 正常响应
                     await record_api_call_success(current_file, model_name=model_name)
                     await _log_result(200, True, response_content=response.content)
+                    content = response.content
+                    # 开关关闭时剔除思考片段（后端不遵守 includeThoughts）
+                    if not return_thoughts:
+                        content = filter_response_bytes(content)
                     return Response(
-                        content=response.content,
+                        content=content,
                         status_code=200,
                         headers=dict(response.headers)
                     )

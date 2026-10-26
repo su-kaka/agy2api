@@ -656,16 +656,20 @@ def is_thinking_model(model_name: str) -> bool:
 
 
 def _apply_thinking(profile: ModelProfile, generation_config: Dict[str, Any], return_thoughts: bool) -> None:
-    """按模型 profile 写入 thinkingConfig (就地修改 generation_config，thinkingConfig 先复制)"""
-    if profile.thinking == "none":
+    """按模型 profile 写入 thinkingConfig (就地修改 generation_config，thinkingConfig 先复制)。
+    thinkingBudget/thinkingLevel 决定思考深度；includeThoughts 决定是否回传思考内容，两者相互独立。"""
+    existing = generation_config.get("thinkingConfig")
+    # 无思考配置的模型不注入 thinkingConfig，避免影响不支持思考的模型
+    if profile.thinking == "none" and not existing:
         return
 
-    thinking_config = dict(generation_config.get("thinkingConfig") or {})
-    thinking_config.pop("thinkingLevel", None)
+    thinking_config = dict(existing or {})
     if profile.thinking == "route":
         # 思考深度由模型 ID 决定，level/budget 会与之冲突
+        thinking_config.pop("thinkingLevel", None)
         thinking_config.pop("thinkingBudget", None)
-    else:  # "budget"
+    elif profile.thinking == "budget":
+        thinking_config.pop("thinkingLevel", None)
         thinking_config["thinkingBudget"] = profile.thinking_budget
     thinking_config["includeThoughts"] = return_thoughts
     generation_config["thinkingConfig"] = thinking_config
@@ -866,8 +870,9 @@ async def normalize_antigravity_request(
     model = result.get("model", "")
     generation_config = (result.get("generationConfig") or {}).copy()
 
-    # 项目固定为 True（原版从 config 读取 return_thoughts，本项目无此配置项）
-    return_thoughts = True
+    # 是否向客户端回传思维链：由面板开关或环境变量 RETURN_THOUGHTS_TO_FRONTEND 控制（默认 True）
+    from config import get_return_thoughts_to_frontend
+    return_thoughts = await get_return_thoughts_to_frontend()
 
     # ========== 0.5 模型名复写（面板可配，热更新） ==========
     # 在抗截断前缀剥离之后、profile 解析之前应用：
