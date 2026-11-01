@@ -1,4 +1,4 @@
-full_hash=07ec1aaa608be4924ab4f6239529c54b2589ce84
-short_hash=07ec1aa
-message=Merge pull request #443 from wan0ge/fix/config-csv-numbers-input
-date=2026-10-28 17:41:24 +0800
+full_hash=9a3d74055a8dff64eec1dd3933822b5bdf7623c9
+short_hash=9a3d740
+message=更新版本
+date=2026-11-01 23:37:54 +0800
