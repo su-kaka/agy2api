@@ -31,15 +31,6 @@ body:
       required: true
   
   - type: input
-    id: channel
-    attributes:
-      label: 调用的是哪个渠道
-      description: 例如 geminicli 或者 antigravity
-      placeholder: "例如: geminicli"
-    validations:
-      required: true
-  
-  - type: input
     id: model
     attributes:
       label: 调用的是哪个模型

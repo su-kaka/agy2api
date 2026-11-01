@@ -13,7 +13,7 @@ security = HTTPBearer()
 # ====================== OAuth Configuration ======================
 
 # Antigravity CLI 客户端仿真常量
-_DEFAULT_ANTIGRAVITY_CLI_VERSION = "1.4.7"
+_DEFAULT_ANTIGRAVITY_CLI_VERSION = "1.4.12"
 _LATEST_RELEASE_URL = (
     "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest"
 )
