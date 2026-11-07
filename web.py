@@ -67,11 +67,26 @@ async def lifespan(app: FastAPI):
 
     # 关闭凭证管理器与数据库
     try:
+        from src.usage_log import flush_usage_logs
+        await flush_usage_logs()
+        log.info("请求日志队列已落库")
+    except Exception as e:
+        log.error(f"落库请求日志时出错: {e}")
+
+    try:
         from src.storage.database import close_database
         await close_database()
         log.info("数据库已关闭")
     except Exception as e:
         log.error(f"关闭数据库时出错: {e}")
+
+    # 关闭共享 httpx 客户端（释放连接池）
+    try:
+        from src.httpx_client import close_shared_clients
+        await close_shared_clients()
+        log.info("HTTP 客户端已关闭")
+    except Exception as e:
+        log.error(f"关闭 HTTP 客户端时出错: {e}")
 
     # 关闭会话凭证缓存
     try:

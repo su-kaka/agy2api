@@ -80,5 +80,18 @@ log = SimpleNamespace(
 )
 
 
+def is_enabled(level: str = "info") -> bool:
+    """判断指定级别日志当前是否会输出。
+
+    热路径上拼接代价高的 debug 日志（如逐 chunk 原始内容），
+    应先调用 log.is_enabled("debug") 再构造字符串：
+        if log.is_enabled("debug"):
+            log.debug(f"expensive {data}")
+    """
+    if not _log_enabled:
+        return False
+    return LOG_LEVELS.get(level, LOG_LEVELS["info"]) >= _cached_log_level
+
+
 # 导出的公共接口
-__all__ = ["log", "set_log_level", "get_log_level", "LOG_LEVELS"]
+__all__ = ["log", "set_log_level", "get_log_level", "LOG_LEVELS", "is_enabled"]

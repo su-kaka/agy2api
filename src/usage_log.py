@@ -1,9 +1,11 @@
 """
 请求日志服务：usage_log 表的写入与统计
 - record_usage_log: 请求完成时写入一条日志（不抛异常，不影响主流程）
+  写入先进入内存队列，由后台任务批量落库，避免在请求热路径上等待 SQLite 写锁
 - extract_usage_tokens: 从 Gemini 响应/流式块中提取 usageMetadata token 计数
 """
 
+import asyncio
 import time
 import uuid
 from typing import Any, Dict, Optional
@@ -17,6 +19,83 @@ from src.storage.database import get_database
 def new_request_id() -> str:
     """生成短请求 ID"""
     return uuid.uuid4().hex[:16]
+
+
+# ====================== 异步批量写入队列 ======================
+
+# 内存队列：请求热路径只做 append（O(1)），后台任务批量写库
+_pending_logs: list = []
+_queue_lock = asyncio.Lock()
+# 后台批量刷新任务（应用启动后首次写入时惰性创建）
+_flush_task: Optional[asyncio.Task] = None
+# 批量落库的间隔（秒）；缓冲区满时立即触发刷新
+_FLUSH_INTERVAL = 2.0
+# 缓冲区上限（超过立即批量落库，防止异常高峰下内存增长）
+_MAX_PENDING = 500
+
+_FLUSH_LOOP_STOP = False
+
+
+async def _flush_pending_logs() -> None:
+    """将待写日志批量落库（分批事务，单条失败不影响整批）"""
+    global _pending_logs
+    async with _queue_lock:
+        batch = _pending_logs
+        _pending_logs = []
+    if not batch:
+        return
+
+    database = await get_database()
+    for entry in batch:
+        try:
+            await database.insert_usage_log(entry)
+        except Exception as e:
+            log.debug(f"请求日志写入失败（不影响主流程）: {e}")
+
+
+async def _flush_loop() -> None:
+    """后台定时批量落库循环"""
+    while True:
+        await asyncio.sleep(_FLUSH_INTERVAL)
+        try:
+            await _flush_pending_logs()
+        except Exception as e:
+            log.debug(f"请求日志批量落库异常: {e}")
+
+
+def _ensure_flush_loop() -> None:
+    """确保后台刷新任务存在（惰性启动，随事件循环生命周期）"""
+    global _flush_task
+    if _flush_task is None or _flush_task.done():
+        _flush_task = asyncio.get_event_loop().create_task(_flush_loop())
+
+
+async def flush_usage_logs() -> None:
+    """立即落库所有待写日志（应用关闭时调用，避免丢日志）"""
+    await _flush_pending_logs()
+
+
+def _enqueue_log(entry: Dict[str, Any]) -> None:
+    """入队一条日志；缓冲区超限时同步触发一次批量落库"""
+    global _pending_logs
+    _pending_logs.append(entry)
+    if len(_pending_logs) >= _MAX_PENDING:
+        try:
+            # 已在事件循环内：调度立即刷新（不阻塞请求）
+            asyncio.get_event_loop().create_task(_flush_pending_logs())
+        except Exception:
+            pass
+
+
+async def _write_log(entry: Dict[str, Any]) -> None:
+    """日志写入入口：开关校验后进入批量队列"""
+    try:
+        if not await config.get_usage_log_enabled():
+            return
+        _ensure_flush_loop()
+        _enqueue_log({**entry, "created_at": entry.get("created_at") or time.time()})
+    except Exception as e:
+        log.debug(f"请求日志入队失败（不影响主流程）: {e}")
 
 
 def extract_usage_tokens(source: Any) -> Dict[str, int]:
@@ -108,24 +187,19 @@ async def record_usage_log(entry: Dict[str, Any]) -> None:
     """
     写入一条请求日志。任何异常仅记录告警，绝不影响主请求流程。
 
+    日志先进内存队列由后台任务批量落库，不阻塞请求热路径。
+
     必要字段: model_name, success
     可选字段: api_format, client_ip, request_id, credential_email, is_stream,
               status_code, use_time, prompt_tokens, completion_tokens, total_tokens, cached_tokens, error_message,
               request_log_file（请求体详细日志的磁盘文件索引，空=未记录）
     """
-    try:
-        if not await config.get_usage_log_enabled():
-            return
-
-        database = await get_database()
-        entry = {**entry, "created_at": entry.get("created_at") or time.time()}
-        await database.insert_usage_log(entry)
-    except Exception as e:
-        log.debug(f"请求日志写入失败（不影响主流程）: {e}")
+    await _write_log(entry)
 
 
 async def clear_usage_logs(days: int) -> int:
     """清理 N 天前的日志，返回删除条数"""
+    await flush_usage_logs()
     database = await get_database()
     cutoff = time.time() - days * 86400
     return await database.delete_usage_logs_before(cutoff)

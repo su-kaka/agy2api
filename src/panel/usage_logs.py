@@ -15,7 +15,7 @@ from config import get_usage_log_enabled
 from log import log
 from src.request_body_log import clear_request_body_logs, read_request_body_log
 from src.storage.database import UsageLog, get_database
-from src.usage_log import clear_usage_logs
+from src.usage_log import clear_usage_logs, flush_usage_logs
 from src.utils import verify_panel_token
 
 
@@ -45,6 +45,8 @@ async def get_usage_logs(
             raise HTTPException(status_code=400, detail="offset 不能为负数")
 
         database = await get_database()
+        # 批量写队列中的待落库日志先刷盘，保证面板看到最新数据
+        await flush_usage_logs()
         items, total = await database.query_usage_logs(
             offset=offset,
             limit=limit,
@@ -77,6 +79,8 @@ async def get_usage_stats(
     """聚合统计：请求数 / 成功失败 / token 汇总 / 平均耗时 / 每模型分布"""
     try:
         database = await get_database()
+        # 批量写队列中的待落库日志先刷盘，保证统计完整
+        await flush_usage_logs()
         stats = await database.usage_log_stats(
             start_timestamp=start_timestamp,
             end_timestamp=end_timestamp,
@@ -130,6 +134,8 @@ async def truncate_logs(token: str = Depends(verify_panel_token)):
     """清空日志：直接 DROP 整张 usage_log 表并重建，不留任何残留"""
     try:
         database = await get_database()
+        # 先刷掉批量写队列中的待落库日志
+        await flush_usage_logs()
         # 先统计当前条数用于返回
         _, total = await database.query_usage_logs(offset=0, limit=1)
 

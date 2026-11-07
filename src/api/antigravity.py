@@ -4,7 +4,6 @@ Antigravity API Client - Handles communication with Google's Antigravity API
 """
 
 import asyncio
-import copy
 import hashlib
 import json
 import time
@@ -19,6 +18,7 @@ from config import (
     get_auto_ban_error_codes,
     get_request_log_enabled,
     get_request_log_error_codes,
+    get_usage_log_enabled,
 )
 from log import log
 
@@ -123,7 +123,10 @@ async def wrap_cli_request(
     将 Gemini 格式请求包装成 Antigravity CLI 格式。
     返回 (payload, request_id)。
     """
-    inner = copy.deepcopy(gemini_request)
+    # 浅拷贝 + 只重建需要修改的层（toolConfig/functionCallingConfig），
+    # 避免对大 payload（长对话历史）做整体 deepcopy 的热路径开销；
+    # contents 等未修改字段与调用方共享引用（调用方随后不再修改）
+    inner = dict(gemini_request)
     first_user_text = _extract_first_user_text(inner)
 
     # 注入 sessionId
@@ -140,10 +143,12 @@ async def wrap_cli_request(
     # 注入 labels
     inner["labels"] = _build_labels(model, session_id, 1)
 
-    # toolConfig 默认 VALIDATED
-    tool_config = inner.get("toolConfig") or {}
-    func_config = tool_config.get("functionCallingConfig") or {}
+    # toolConfig 默认 VALIDATED（重建这两层，不污染调用方的 dict）
+    src_tool_config = inner.get("toolConfig") or {}
+    src_func_config = src_tool_config.get("functionCallingConfig") or {}
+    func_config = dict(src_func_config)
     func_config["mode"] = "VALIDATED"
+    tool_config = dict(src_tool_config)
     tool_config["functionCallingConfig"] = func_config
     inner["toolConfig"] = tool_config
 
@@ -521,20 +526,13 @@ async def stream_request(
                         success_recorded = True
                         log.debug(f"[ANTIGRAVITY STREAM] 开始接收流式响应，模型: {model_name}")
 
-                    # 从流块中提取 token 用量。
-                    # usageMetadata 可能出现在多个块（首块可能只是部分计数），
-                    # 上游最终计数以最后出现的 usageMetadata 为准（last-wins，
-                    # 对齐 Antigravity-Manager 的流式 usage 聚合行为）
-                    if native is False:
+                    # 从流块中提取 token 用量（热路径优化）：
+                    # usageMetadata 几乎只出现在流尾块。先用低开销的子串探测，
+                    # 命中才做完整 JSON 解析，避免对每个 chunk 两次 json.loads
+                    if native is False and "usageMetadata" in chunk:
                         extracted = extract_usage_tokens(chunk)
                         if extracted:
                             usage_tokens = extracted
-
-                    # 记录原始chunk内容（用于调试）
-                    if isinstance(chunk, bytes):
-                        log.debug(f"[ANTIGRAVITY STREAM RAW] chunk(bytes): {chunk}")
-                    else:
-                        log.debug(f"[ANTIGRAVITY STREAM RAW] chunk(str): {chunk}")
 
                     yield chunk
 
@@ -677,7 +675,10 @@ async def non_stream_request(
             is_stream=False,
         )
 
-        tokens = extract_usage_tokens(response_content) if success else {}
+        # usage_log 关闭时跳过 token 解析（避免无谓的整包 JSON 解析）
+        tokens = {}
+        if success and await get_usage_log_enabled():
+            tokens = extract_usage_tokens(response_content)
         # 每条日志记录本次调用实际使用的凭证
         await record_usage_log({
             **log_entry,

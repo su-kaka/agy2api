@@ -1015,9 +1015,6 @@ async def gemini_stream_to_anthropic_stream(
                 yield error_content
                 return
 
-            # 记录接收到的原始chunk
-            log.debug(f"[GEMINI_TO_ANTHROPIC] Raw chunk: {chunk[:200] if chunk else b''}")
-
             # finishReason 之后的残余块只消费不转换：
             # 提前 break 会沿生成器链下发 GeneratorExit，导致底层
             # stream_request 的成功日志记录代码永远不执行（issue #438）
@@ -1026,22 +1023,17 @@ async def gemini_stream_to_anthropic_stream(
 
             # 解析 Gemini 流式块
             if not chunk or not chunk.startswith(b"data: "):
-                log.debug(f"[GEMINI_TO_ANTHROPIC] Skipping chunk (not SSE format or empty)")
                 continue
 
             raw = chunk[6:].strip()
             if raw == b"[DONE]":
-                log.debug(f"[GEMINI_TO_ANTHROPIC] Received [DONE] marker")
                 # 同 finishReason：不 break，改为消费剩余块直到流自然结束，
                 # 避免向底层 stream_request 下发 GeneratorExit 导致日志丢失
                 stream_finished = True
                 continue
 
-            log.debug(f"[GEMINI_TO_ANTHROPIC] Parsing JSON: {raw[:200]}")
-
             try:
                 data = json.loads(raw.decode('utf-8', errors='ignore'))
-                log.debug(f"[GEMINI_TO_ANTHROPIC] Parsed data: {json.dumps(data, ensure_ascii=False)[:300]}")
             except Exception as e:
                 log.warning(f"[GEMINI_TO_ANTHROPIC] JSON parse error: {e}")
                 continue
