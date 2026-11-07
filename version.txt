@@ -1,4 +1,4 @@
-full_hash=2c40afa30c8811f602aa40e1f8ecf20b595b3af1
-short_hash=2c40afa
-message=优化性能
-date=2026-11-07 12:25:00 +0800
+full_hash=3301e116bc81b10a6f30c93b14a44ba5ccbc8afa
+short_hash=3301e11
+message=Create AGENTS.md
+date=2026-11-07 13:10:40 +0800
