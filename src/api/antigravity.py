@@ -126,9 +126,6 @@ async def wrap_cli_request(
     inner = copy.deepcopy(gemini_request)
     first_user_text = _extract_first_user_text(inner)
 
-    # 移除 safetySettings（CLI 不发送）
-    inner.pop("safetySettings", None)
-
     # 注入 sessionId
     session_id = str(inner.get("sessionId") or "").strip()
     if not session_id:
