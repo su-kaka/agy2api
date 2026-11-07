@@ -67,7 +67,7 @@ async def _import_single_credential(data: Dict[str, Any]) -> Dict[str, Any]:
         email = (data.get("email") or "").strip().lower() or None
         tier = (data.get("tier") or "").strip().lower() or None
         project_id = (data.get("project_id") or "").strip() or None
-        access_token = (str(data.get("access_token") or data.get("token") or "")).strip()
+        access_token = (str(data.get("access_token") or "")).strip()
         expiry = (str(data.get("expiry") or "")).strip()
 
         # 提供了未过期的 access_token 时直接复用（跳过刷新，避免批量导入触发 OAuth 限流）
