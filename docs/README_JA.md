@@ -294,7 +294,7 @@ agy2apiは2つのストレージバックエンドに対応: **ローカルSQLit
 クレデンシャルは**メールアドレス（email）を一意キー**として構造化データベースカラムで保存されます（JSON blobは不使用）:
 `email`、`access_token`、`refresh_token`、`client_id`、`client_secret`、`project_id`、`expiry`、`tier`
 
-インポート/エクスポートは標準化JSON形式: `{"refresh_token": "...", "email": "...", "tier": "...", "project_id": "..."}`（`refresh_token` のみ必須、残りは自動取得）。
+インポート/エクスポートは標準化JSON形式: `{"refresh_token": "...", "access_token": "...", "expiry": "...", "email": "...", "tier": "...", "project_id": "..."}`（`refresh_token` のみ必須、有効期限内の `access_token` はそのまま再利用、残りは自動取得）。
 
 ### 環境変数設定
 

@@ -60,6 +60,8 @@ export default function UploadPage() {
           <p className="mb-1 font-medium text-gray-400">规范 JSON 格式：</p>
           <pre className="text-emerald-300/80 whitespace-pre-wrap font-mono">{`{
   "refresh_token": "必填",
+  "access_token": "可选，未过期时直接复用",
+  "expiry": "可选，access_token 过期时间",
   "email": "可选，缺失自动获取",
   "tier": "可选，缺失自动获取",
   "project_id": "可选，缺失自动获取"

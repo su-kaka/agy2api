@@ -1,7 +1,7 @@
 """
 凭证管理路由模块 - 处理 /creds/* 相关的HTTP请求（仅 Antigravity 模式）
 凭证以 email 为唯一键；导入/导出使用规范 JSON 格式：
-  { "refresh_token": "...", "email": "...", "tier": "...", "project_id": "..." }
+  { "refresh_token": "...", "access_token": "...", "expiry": "...", "email": "...", "tier": "...", "project_id": "..." }
 """
 
 import asyncio
@@ -53,7 +53,8 @@ async def _import_single_credential(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     导入单个凭证（规范格式）。
     必须字段: refresh_token
-    可选字段: email / tier / project_id（缺失时自动获取）
+    可选字段: email / tier / project_id / access_token / expiry
+    （access_token 未过期时直接复用；否则用 refresh_token 刷新获取，其余缺失字段自动获取）
 
     Returns:
         {"status": "success"|"error", "email": ..., "message": ...}
@@ -66,18 +67,34 @@ async def _import_single_credential(data: Dict[str, Any]) -> Dict[str, Any]:
         email = (data.get("email") or "").strip().lower() or None
         tier = (data.get("tier") or "").strip().lower() or None
         project_id = (data.get("project_id") or "").strip() or None
+        access_token = (str(data.get("access_token") or data.get("token") or "")).strip()
+        expiry = (str(data.get("expiry") or "")).strip()
 
-        # 用 refresh_token 换 access_token，同时验证凭证有效性
-        creds = Credentials(
-            access_token="",
-            refresh_token=refresh_token,
-            client_id=ANTIGRAVITY_CLIENT_ID,
-            client_secret=ANTIGRAVITY_CLIENT_SECRET,
-        )
-        try:
-            await creds.refresh()
-        except Exception as e:
-            return {"status": "error", "message": f"refresh_token 无效: {str(e)[:200]}"}
+        # 提供了未过期的 access_token 时直接复用（跳过刷新，避免批量导入触发 OAuth 限流）
+        creds = None
+        if access_token:
+            candidate = Credentials.from_dict({
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "client_id": ANTIGRAVITY_CLIENT_ID,
+                "client_secret": ANTIGRAVITY_CLIENT_SECRET,
+                "expiry": expiry,
+            })
+            if not candidate.is_expired():
+                creds = candidate
+
+        # 无可用 access_token 时，用 refresh_token 换 access_token，同时验证凭证有效性
+        if creds is None:
+            creds = Credentials(
+                access_token="",
+                refresh_token=refresh_token,
+                client_id=ANTIGRAVITY_CLIENT_ID,
+                client_secret=ANTIGRAVITY_CLIENT_SECRET,
+            )
+            try:
+                await creds.refresh()
+            except Exception as e:
+                return {"status": "error", "message": f"refresh_token 无效: {str(e)[:200]}"}
 
         if not creds.access_token:
             return {"status": "error", "message": "refresh_token 无效: 未获取到 access_token"}
@@ -187,7 +204,7 @@ async def extract_json_files_from_zip(zip_file: UploadFile) -> List[dict]:
 
 
 async def upload_credentials_common( files: List[UploadFile] ) -> JSONResponse:
-    """批量导入凭证文件（规范 JSON：refresh_token 必填，email/tier/project_id 可选自动获取）"""
+    """批量导入凭证文件（规范 JSON：refresh_token 必填，access_token/expiry/email/tier/project_id 可选）"""
 
     if not files:
         raise HTTPException(status_code=400, detail="请选择要上传的文件")
@@ -351,18 +368,19 @@ async def download_all_creds_common() -> Response:
         for email in emails:
             try:
                 state = await database.get_credential_state(email)
+                # 从凭证数据中取 refresh_token / access_token / expiry
+                cred = await database.get_credential(email)
+                if not cred:
+                    continue
+
                 export_data = {
-                    "refresh_token": "",
+                    "refresh_token": cred.get("refresh_token", ""),
+                    "access_token": cred.get("access_token", ""),
+                    "expiry": cred.get("expiry", ""),
                     "email": email,
                     "tier": state.get("tier", "pro"),
                     "project_id": state.get("project_id", ""),
                 }
-                # 从凭证数据中取 refresh_token
-                cred = await database.get_credential(email)
-                if cred:
-                    export_data["refresh_token"] = cred.get("refresh_token", "")
-                else:
-                    continue
 
                 content = json.dumps(export_data, ensure_ascii=False, indent=2)
                 zip_file.writestr(f"{email}.json", content)
@@ -601,6 +619,8 @@ async def export_credential(
 
         export_data = {
             "refresh_token": cred.get("refresh_token", ""),
+            "access_token": cred.get("access_token", ""),
+            "expiry": cred.get("expiry", ""),
             "email": email,
             "tier": state.get("tier", "pro"),
             "project_id": cred.get("project_id", ""),

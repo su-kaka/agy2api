@@ -126,7 +126,7 @@ docker run -d --name agy2api --network host -e API_PASSWORD=api_pwd -e PANEL_PAS
 基于 React + Vite + Tailwind 编译的现代化前端界面：
 - Antigravity OAuth 认证流程（支持回调 URL 快捷方式）
 - 凭证文件上传（JSON/ZIP）、下载、详情查看
-- 凭证导出（规范 JSON：refresh_token/email/tier/project_id）
+- 凭证导出（规范 JSON：refresh_token/access_token/expiry/email/tier/project_id）
 - 系统配置管理（环境变量锁定提示、热更新）
 - 批量凭证操作和状态筛选、批量导入（缺失字段自动获取）
 - 移动端自适应
@@ -176,7 +176,7 @@ docker run -d --name agy2api --network host -e API_PASSWORD=api_pwd -e PANEL_PAS
 凭证以**邮箱（email）为唯一键**存储，字段为结构化数据库列（不再使用 JSON blob）：
 `email`、`access_token`、`refresh_token`、`client_id`、`client_secret`、`project_id`、`expiry`、`tier`
 
-凭证导入/导出使用规范 JSON 格式：`{"refresh_token": "...", "email": "...", "tier": "...", "project_id": "..."}`（仅 `refresh_token` 必填，其余字段可自动获取）。
+凭证导入/导出使用规范 JSON 格式：`{"refresh_token": "...", "access_token": "...", "expiry": "...", "email": "...", "tier": "...", "project_id": "..."}`（仅 `refresh_token` 必填，`access_token` 未过期时直接复用，其余字段可自动获取）。
 
 ### 环境变量配置
 
