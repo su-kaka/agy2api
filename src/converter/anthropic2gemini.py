@@ -348,24 +348,27 @@ def clean_json_schema(schema: Any) -> Any:
     if "properties" in cleaned and "type" not in cleaned:
         cleaned["type"] = "object"
 
+    # required 与 nullable 正交：null 也是合法取值，nullable 不等于可选。
+    # 保留原始接口契约中的 required 约束，避免上游把必填参数当作可选，
+    # 进而在工具调用时生成空参数 {}。
     if (
         isinstance(schema.get("properties"), dict)
         and isinstance(cleaned.get("required"), list)
     ):
-        nullable_fields = {
-            name
-            for name, prop in schema["properties"].items()
-            if isinstance(prop, dict)
-            and isinstance(prop.get("type"), list)
-            and any(str(t).lower() == "null" for t in prop["type"])
-        }
-        if nullable_fields:
-            cleaned["required"] = [
-                item for item in cleaned["required"]
-                if item not in nullable_fields
-            ]
-            if not cleaned["required"]:
-                cleaned.pop("required", None)
+        prop_names = set(cleaned.get("properties", {}).keys()) \
+            if isinstance(cleaned.get("properties"), dict) else None
+        required = []
+        for item in cleaned["required"]:
+            if not isinstance(item, str):
+                continue
+            if prop_names is not None and item not in prop_names:
+                continue
+            if item not in required:
+                required.append(item)
+        if required:
+            cleaned["required"] = required
+        else:
+            cleaned.pop("required", None)
 
     return cleaned
 

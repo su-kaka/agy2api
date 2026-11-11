@@ -225,26 +225,19 @@ def _clean_parameters_json_schema(
         if key in unsupported_keys or key.startswith("x-"):
             del result[key]
 
-    nullable_props = set()
     if isinstance(result.get("properties"), dict):
-        cleaned_props = {}
-        for prop_name, prop_schema in result["properties"].items():
-            if isinstance(prop_schema, dict):
-                prop_type = prop_schema.get("type")
-                if (
-                    prop_schema.get("nullable") is True
-                    or (
-                        isinstance(prop_type, list)
-                        and any(str(t).lower() == "null" for t in prop_type)
-                    )
-                ):
-                    nullable_props.add(prop_name)
-            cleaned_props[prop_name] = _clean_parameters_json_schema(prop_schema, root_schema, visited)
-        result["properties"] = cleaned_props
+        result["properties"] = {
+            prop_name: _clean_parameters_json_schema(prop_schema, root_schema, visited)
+            for prop_name, prop_schema in result["properties"].items()
+        }
 
     if "properties" in result and "type" not in result:
         result["type"] = "object"
 
+    # required 仅约束字段必须出现，null 也是合法取值；nullable 不等于可选。
+    # 若把 nullable 属性（如 Pydantic v2 的 type: ["string", "null"]）从 required
+    # 中剔除，上游 Gemini 会认为所有参数都非必填，频繁生成空参数 {} 的工具调用，
+    # 因此保留原始接口契约中的 required 约束。
     if isinstance(result.get("required"), list):
         prop_names = set(result.get("properties", {}).keys()) if isinstance(result.get("properties"), dict) else None
         required = []
@@ -252,8 +245,6 @@ def _clean_parameters_json_schema(
             if not isinstance(item, str):
                 continue
             if prop_names is not None and item not in prop_names:
-                continue
-            if item in nullable_props:
                 continue
             if item not in required:
                 required.append(item)

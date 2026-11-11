@@ -753,20 +753,20 @@ def _clean_schema_for_parameters_json_schema(
         if key in unsupported_keys or key.startswith("x-"):
             del result[key]
 
-    nullable_props = set()
     if "properties" in result and isinstance(result["properties"], dict):
-        cleaned_props = {}
-        for prop_name, prop_schema in result["properties"].items():
-            if isinstance(prop_schema, dict):
-                prop_type = prop_schema.get("type")
-                if isinstance(prop_type, list) and any(str(t).lower() == "null" for t in prop_type):
-                    nullable_props.add(prop_name)
-            cleaned_props[prop_name] = _clean_schema_for_parameters_json_schema(prop_schema, root_schema, visited)
+        cleaned_props = {
+            prop_name: _clean_schema_for_parameters_json_schema(prop_schema, root_schema, visited)
+            for prop_name, prop_schema in result["properties"].items()
+        }
         result["properties"] = cleaned_props
 
     if "properties" in result and "type" not in result:
         result["type"] = "object"
 
+    # required 仅约束字段必须出现，null 也是合法取值；nullable 不等于可选。
+    # 若把 nullable 属性（如 Pydantic v2 的 type: ["string", "null"]）从 required
+    # 中剔除，上游 Gemini 会认为所有参数都非必填，频繁生成空参数 {} 的工具调用，
+    # 因此保留原始接口契约中的 required 约束。
     if "required" in result and isinstance(result["required"], list):
         prop_names = set(result.get("properties", {}).keys()) if isinstance(result.get("properties"), dict) else None
         required = []
@@ -774,8 +774,6 @@ def _clean_schema_for_parameters_json_schema(
             if not isinstance(item, str):
                 continue
             if prop_names is not None and item not in prop_names:
-                continue
-            if item in nullable_props:
                 continue
             if item not in required:
                 required.append(item)
@@ -1071,8 +1069,15 @@ def extract_tool_calls_from_parts(
             function_call = part["functionCall"]
             # 获取原始ID或生成新ID
             original_id = function_call.get("id") or f"call_{uuid.uuid4().hex[:24]}"
-            # 获取参数并转换类型
+            # 获取参数并转换类型（容错：部分代理上游会返回 JSON 字符串格式的 args）
             args = function_call.get("args", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+            if not isinstance(args, dict):
+                args = {}
             # 将字符串类型的值转回原始类型
             args = _reverse_transform_args(args)
 
