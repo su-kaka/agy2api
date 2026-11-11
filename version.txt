@@ -1,4 +1,4 @@
-full_hash=dfcfb52b1d167020adf5307a794c2b3234043325
-short_hash=dfcfb52
-message=Update utils.py
-date=2026-11-10 12:29:05 +0800
+full_hash=6ddb624ff773bc76ed5b4aadf9d8edcbbe1a5a4b
+short_hash=6ddb624
+message=修复工具 Schema 清理时 nullable 必填参数被误剔出 required 的问题
+date=2026-11-11 20:42:22 +0800
