@@ -238,6 +238,8 @@ def main():
 
     host, port, certfile, keyfile = asyncio.run(_listen_settings())
     workers = int(os.environ.get("WORKERS", 1))
+    if keyfile and not certfile:
+        raise SystemExit("已配置 SSL_KEYFILE 但缺少 SSL_CERTFILE：启用 HTTPS 需要证书文件")
     scheme = "https" if certfile else "http"
 
     log.info("=" * 60)

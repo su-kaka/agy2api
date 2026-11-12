@@ -264,11 +264,11 @@ async def save_config(request: ConfigSaveRequest, token: str = Depends(verify_pa
             if key in new_config and not isinstance(new_config[key], str):
                 raise HTTPException(status_code=400, detail="SSL 证书与私钥路径必须是字符串")
 
-        # 只配一半会让 uvicorn 启动失败，保存时先拦住
-        if bool(str(new_config.get("ssl_certfile") or "").strip()) != bool(
-            str(new_config.get("ssl_keyfile") or "").strip()
-        ):
-            raise HTTPException(status_code=400, detail="SSL 证书与私钥必须同时填写，或同时留空")
+        # 只有私钥没有证书会让 uvicorn 断言失败退出；证书内已含私钥时私钥可留空
+        if str(new_config.get("ssl_keyfile") or "").strip() and not str(
+            new_config.get("ssl_certfile") or ""
+        ).strip():
+            raise HTTPException(status_code=400, detail="填写 SSL 私钥时必须同时填写 SSL 证书")
 
         if "api_password" in new_config:
             if not isinstance(new_config["api_password"], str):
