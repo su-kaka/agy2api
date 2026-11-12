@@ -153,12 +153,15 @@ def _row_to_credential_dict(row: AntigravityCredential) -> Dict[str, Any]:
 def get_cooldown_group(model_name: str) -> str:
     """
     模型 CD 分组：同家族模型共享一个冷却键
+    - 名字带 image -> "image"（图片生成独立配额，需在 gemini 之前判断）
     - 名字带 argon -> "argon"
     - 名字带 gemini -> "gemini"
     - 名字带 claude 或 gpt -> "claude_gpt"
     - 其他 -> 原始模型名
     """
     lowered = (model_name or "").lower()
+    if "image" in lowered:
+        return "image"
     if "argon" in lowered:
         return "argon"
     if "gemini" in lowered:
@@ -661,7 +664,7 @@ class Database:
         model_name: str,
         cooldown_until: Optional[float],
     ) -> bool:
-        """设置/清除模型的冷却时间（按家族分组：argon / gemini / claude_gpt / 其他原名）"""
+        """设置/清除模型的冷却时间（按家族分组：image / argon / gemini / claude_gpt / 其他原名）"""
         cd_group = get_cooldown_group(model_name)
         async with self.session() as s:
             row = await s.scalar(

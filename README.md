@@ -108,7 +108,7 @@ docker run -d --name agy2api --network host -e API_PASSWORD=api_pwd -e PANEL_PAS
 ### 📊 智能凭证管理系统
 
 - 多个 Google OAuth 凭证自动轮换（随机负载均衡）
-- 模型级冷却（429 错误自动设置对应模型家族的 CD：argon / gemini / claude+gpt 共享冷却）
+- 模型级冷却（429 错误自动设置对应模型家族的 CD：image / argon / gemini / claude+gpt 共享冷却）
 - 自动故障检测和凭证禁用
 - 凭证使用统计和配额/额度查询
 - 批量操作（启用、禁用、删除）
