@@ -1,4 +1,4 @@
-full_hash=e63b3301617ab2375df292047ec2da14094b8704
-short_hash=e63b330
-message=image 模型独立 CD 键，优先级排在 gemini 之前
-date=2026-11-12 11:32:56 +0800
+full_hash=509c98237670ec6d7153599454b01359d6a440e6
+short_hash=509c982
+message=Merge pull request #452 from zeroHYH/feat/multi-credential-model-routing
+date=2026-11-13 00:57:27 +0800
