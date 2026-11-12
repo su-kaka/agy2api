@@ -228,7 +228,8 @@ async def get_server_host() -> str:
     Database config key: host
     Default: 0.0.0.0
     """
-    return str(await get_config_value("host", "0.0.0.0", "HOST"))
+    # uvicorn 的 host 参数要求裸 IPv6 地址，[::] / [::1] 这类 URL 写法要去掉方括号
+    return str(await get_config_value("host", "0.0.0.0", "HOST")).strip().strip("[]")
 
 
 async def get_server_port() -> int:
