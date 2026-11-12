@@ -10,7 +10,7 @@ import os
 import random
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import (
     Boolean,
@@ -60,6 +60,9 @@ class AntigravityCredential(Base):
 
     # 模型级冷却 (JSON: {model_name: cooldown_timestamp})
     model_cooldowns: Mapped[str] = mapped_column(Text, default="{}")
+
+    # 凭证支持的模型列表 (JSON: [model_id, ...]；空数组 [] 表示尚未探测)
+    supported_models: Mapped[str] = mapped_column(Text, default="[]")
 
     # tier 状态 (free/pro/ultra)
     tier: Mapped[Optional[str]] = mapped_column(String(32), default="pro")
@@ -171,6 +174,43 @@ def get_cooldown_group(model_name: str) -> str:
     return model_name
 
 
+def _credential_supports_model(
+    supported_models: List[str], model_name: Optional[str]
+) -> Optional[bool]:
+    """
+    检查凭证的 supported_models 是否支持指定 model_name。
+
+    Returns:
+        True:  明确支持（或无需检查 model_name）
+        None:  未知（supported_models 为空，尚未探测）
+        False: 已探测过模型列表，但明确不包含该模型
+    """
+    if not model_name:
+        return True
+    if not supported_models:
+        return None
+
+    model_set = {str(m).strip().lower() for m in supported_models if m}
+    if not model_set:
+        return None
+
+    target = model_name.strip().lower()
+    if target in model_set:
+        return True
+
+    # 兼容衍生模型别名映射
+    if target == "claude-sonnet-4-6-thinking" and "claude-sonnet-4-6" in model_set:
+        return True
+    if target == "claude-sonnet-4-6" and "claude-sonnet-4-6-thinking" in model_set:
+        return True
+    if target == "claude-opus-4-6" and "claude-opus-4-6-thinking" in model_set:
+        return True
+    if target == "claude-opus-4-6-thinking" and "claude-opus-4-6" in model_set:
+        return True
+
+    return False
+
+
 # ====================== 数据库管理器 ======================
 
 class Database:
@@ -269,7 +309,7 @@ class Database:
                 sync_conn.execute(text(f"DROP TABLE {table_name}"))
 
         # 已存在的表补齐缺失列（ALTER TABLE ADD COLUMN，保留数据）
-        for orm_model in (UsageLog,):
+        for orm_model in (AntigravityCredential, UsageLog):
             table = orm_model.__table__
             if not inspector.has_table(table.name):
                 continue
@@ -339,6 +379,7 @@ class Database:
             expiry_val = credential_data.get("expiry") or ""
             expiry = expiry_val.isoformat() if hasattr(expiry_val, "isoformat") else str(expiry_val)
             tier = credential_data.get("tier")
+            supported_models = credential_data.get("supported_models")
 
             if row:
                 row.access_token = access_token
@@ -349,6 +390,8 @@ class Database:
                 row.expiry = expiry
                 if tier:
                     row.tier = tier
+                if isinstance(supported_models, list):
+                    row.supported_models = _dump_json(supported_models)
                 row.updated_at = time.time()
             else:
                 s.add(AntigravityCredential(
@@ -360,6 +403,7 @@ class Database:
                     project_id=project_id,
                     expiry=expiry,
                     tier=tier or "pro",
+                    supported_models=_dump_json(supported_models) if isinstance(supported_models, list) else "[]",
                     last_success=time.time(),
                 ))
             log.debug(f"Stored credential: {email}")
@@ -395,19 +439,23 @@ class Database:
             return False
 
     async def get_next_available_credential(
-        self, model_name: Optional[str] = None
+        self,
+        model_name: Optional[str] = None,
+        exclude_emails: Optional[Set[str]] = None,
     ) -> Optional[Tuple[str, Dict[str, Any]]]:
-        """随机获取一个可用凭证（负载均衡 + 模型家族级冷却过滤），返回 (email, credential)"""
+        """随机获取一个可用凭证（负载均衡 + 模型家族级冷却过滤 + 模型能力匹配），返回 (email, credential)"""
         current_time = time.time()
         cd_group = get_cooldown_group(model_name) if model_name else None
+        excluded = {e.strip().lower() for e in exclude_emails if e} if exclude_emails else set()
         async with self.session() as s:
-            # 轻量查询：只取必要的小字段（email/冷却/禁用），避免全表加载
+            # 轻量查询：只取必要的小字段（email/冷却/支持模型/禁用），避免全表加载
             # access_token/refresh_token 等大字段（凭证明文可达数 KB）
             rows = (
                 await s.execute(
                     select(
                         AntigravityCredential.email,
                         AntigravityCredential.model_cooldowns,
+                        AntigravityCredential.supported_models,
                     )
                     .where(AntigravityCredential.disabled == False)  # noqa: E712
                     .order_by(AntigravityCredential.id)
@@ -415,19 +463,33 @@ class Database:
             ).all()
             if not rows:
                 return None
-            # Python 侧随机负载均衡（过滤模型家族冷却）
-            candidates = rows
-            if cd_group:
-                candidates = []
-                for email, model_cooldowns in rows:
+
+            # Python 侧过滤：排除已失败凭证 + 模型家族冷却 + 模型支持检查
+            matched_candidates: List[str] = []
+            unknown_candidates: List[str] = []
+            for email, model_cooldowns, supported_models_raw in rows:
+                if excluded and email.strip().lower() in excluded:
+                    continue
+                if cd_group:
                     cooldowns = _load_json(model_cooldowns, {})
                     cd = cooldowns.get(cd_group)
                     if cd is not None and current_time < cd:
                         continue
-                    candidates.append((email, model_cooldowns))
-            if not candidates:
+                supported_models = _load_json(supported_models_raw, [])
+                support_state = _credential_supports_model(
+                    supported_models if isinstance(supported_models, list) else [],
+                    model_name,
+                )
+                if support_state is True:
+                    matched_candidates.append(email)
+                elif support_state is None:
+                    unknown_candidates.append(email)
+
+            # 优先从明确支持该模型的凭证中随机选；若无，则从尚未探测过模型列表的凭证中选
+            pool = matched_candidates if matched_candidates else unknown_candidates
+            if not pool:
                 return None
-            picked_email = random.choice(candidates)[0]
+            picked_email = random.choice(pool)
             # 只取被选中凭证的完整数据
             row = await s.scalar(
                 select(AntigravityCredential).where(
@@ -439,13 +501,18 @@ class Database:
             return row.email, _row_to_credential_dict(row)
 
     async def get_available_credential_by_email(
-        self, email: str, model_name: Optional[str] = None
+        self,
+        email: str,
+        model_name: Optional[str] = None,
+        exclude_emails: Optional[Set[str]] = None,
     ) -> Optional[Tuple[str, Dict[str, Any]]]:
         """
         按指定 email 获取可用凭证（凭证亲和/粘性模式使用）。
-        凭证不存在/被禁用/该模型家族冷却中 -> None。
+        凭证不存在/被禁用/该模型家族冷却中/明确不支持该模型 -> None。
         """
         if not email:
+            return None
+        if exclude_emails and email.strip().lower() in {e.strip().lower() for e in exclude_emails if e}:
             return None
         current_time = time.time()
         cd_group = get_cooldown_group(model_name) if model_name else None
@@ -460,6 +527,13 @@ class Database:
                 cd = cooldowns.get(cd_group)
                 if cd is not None and current_time < cd:
                     return None
+            supported_models = _load_json(row.supported_models, [])
+            support_state = _credential_supports_model(
+                supported_models if isinstance(supported_models, list) else [],
+                model_name,
+            )
+            if support_state is False:
+                return None
             return row.email, _row_to_credential_dict(row)
 
     # ---------- 状态管理 ----------
@@ -468,7 +542,7 @@ class Database:
         self, email: str, state_updates: Dict[str, Any]
     ) -> bool:
         """更新凭证状态字段"""
-        json_fields = {"error_codes", "error_messages", "model_cooldowns"}
+        json_fields = {"error_codes", "error_messages", "model_cooldowns", "supported_models"}
         float_fields = {"last_success"}
         str_fields = {"user_email", "tier", "project_id"}
         bool_fields = {"disabled"}
@@ -509,6 +583,7 @@ class Database:
                 "last_success": row.last_success or time.time(),
                 "email": row.email,
                 "model_cooldowns": _load_json(row.model_cooldowns, {}),
+                "supported_models": _load_json(row.supported_models, []),
                 "tier": row.tier or "pro",
                 "project_id": row.project_id or "",
             }
@@ -528,10 +603,78 @@ class Database:
                     "last_success": row.last_success or time.time(),
                     "email": row.email,
                     "model_cooldowns": cooldowns,
+                    "supported_models": _load_json(row.supported_models, []),
                     "tier": row.tier or "pro",
                     "project_id": row.project_id or "",
                 }
             return states
+
+    async def get_enabled_credentials_models_info(self) -> Tuple[List[str], List[str]]:
+        """
+        获取所有启用凭证的模型并集与尚未探测模型列表的启用凭证 email 列表。
+
+        Returns:
+            (union_model_ids, unprobed_emails)
+        """
+        async with self.session() as s:
+            rows = (
+                await s.execute(
+                    select(
+                        AntigravityCredential.email,
+                        AntigravityCredential.supported_models,
+                    )
+                    .where(AntigravityCredential.disabled == False)  # noqa: E712
+                    .order_by(AntigravityCredential.id)
+                )
+            ).all()
+            seen: Set[str] = set()
+            union_models: List[str] = []
+            unprobed_emails: List[str] = []
+            for email, supported_models_raw in rows:
+                models = _load_json(supported_models_raw, [])
+                if not isinstance(models, list) or not models:
+                    unprobed_emails.append(email)
+                    continue
+                for m in models:
+                    if isinstance(m, str) and m and m not in seen:
+                        seen.add(m)
+                        union_models.append(m)
+            return union_models, unprobed_emails
+
+    async def remove_model_from_credential(self, email: str, model_name: str) -> bool:
+        """从指定凭证的 supported_models 中移除某个不支持的模型"""
+        if not email or not model_name:
+            return False
+        async with self.session() as s:
+            row = await s.scalar(
+                select(AntigravityCredential).where(AntigravityCredential.email == email)
+            )
+            if not row:
+                return False
+            models = _load_json(row.supported_models, [])
+            if not isinstance(models, list) or not models:
+                return False
+            target = model_name.strip().lower()
+            # 同时移除衍生映射模型名
+            remove_targets = {target}
+            if target == "claude-sonnet-4-6":
+                remove_targets.add("claude-sonnet-4-6-thinking")
+            elif target == "claude-sonnet-4-6-thinking":
+                remove_targets.add("claude-sonnet-4-6")
+            elif target == "claude-opus-4-6-thinking":
+                remove_targets.add("claude-opus-4-6")
+            elif target == "claude-opus-4-6":
+                remove_targets.add("claude-opus-4-6-thinking")
+
+            new_models = [
+                m for m in models
+                if isinstance(m, str) and m.strip().lower() not in remove_targets
+            ]
+            if len(new_models) != len(models):
+                row.supported_models = _dump_json(new_models)
+                row.updated_at = time.time()
+                return True
+            return False
 
     async def get_credentials_summary(
         self,
@@ -595,12 +738,16 @@ class Database:
                     if not match:
                         continue
 
+                supported_models = _load_json(row.supported_models, [])
+                if not isinstance(supported_models, list):
+                    supported_models = []
                 summary = {
                     "email": row.email,
                     "disabled": bool(row.disabled),
                     "error_codes": error_codes,
                     "last_success": row.last_success or current_time,
                     "model_cooldowns": active_cooldowns,
+                    "supported_models": supported_models,
                     "tier": row.tier or "pro",
                     "project_id": row.project_id or "",
                 }
