@@ -8,7 +8,7 @@
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 from log import log
 
@@ -32,9 +32,10 @@ def _reset_sticky() -> None:
 async def get_valid_credential(
     model_name: Optional[str] = None,
     session_key: Optional[str] = None,
+    exclude_emails: Optional[Set[str]] = None,
 ) -> Optional[Tuple[str, Dict[str, Any]]]:
     """
-    获取可用凭证：按凭证选择模式选取，自动跳过禁用/冷却凭证。
+    获取可用凭证：按凭证选择模式选取，自动跳过禁用/冷却/不支持目标模型的凭证。
     Token 失效时自动刷新；刷新失败（凭证永久失效）自动禁用并尝试下一个。
 
     凭证选择模式（config: credential_select_mode）:
@@ -48,42 +49,52 @@ async def get_valid_credential(
     global _sticky_email
     database = await get_database()
     mode = await get_credential_select_mode()
+    tried_emails: Set[str] = set(exclude_emails) if exclude_emails else set()
 
     # cache 模式：先查会话绑定
     if mode == "cache" and session_key:
         bound_email = await session_cache.get_session_binding(session_key)
         if bound_email:
             result = await database.get_available_credential_by_email(
-                bound_email, model_name=model_name
+                bound_email,
+                model_name=model_name,
+                exclude_emails=tried_emails,
             )
             if result:
                 log.debug(f"会话缓存命中: {bound_email}")
                 final = await _validate_or_refresh(result[0], result[1])
                 if final is None:
                     # 绑定凭证 token 永久失效等，解绑走正常选取
+                    tried_emails.add(bound_email)
                     await session_cache.delete_session_binding(session_key)
                 else:
                     return final
             else:
-                # 绑定凭证不可用（禁用/CD/删除），解绑
+                # 绑定凭证不可用（禁用/CD/删除/不支持当前模型），解绑
                 await session_cache.delete_session_binding(session_key)
 
     # sticky 模式：优先当前粘性凭证
     if mode == "sticky" and _sticky_email:
         result = await database.get_available_credential_by_email(
-            _sticky_email, model_name=model_name
+            _sticky_email,
+            model_name=model_name,
+            exclude_emails=tried_emails,
         )
         if result:
             final = await _validate_or_refresh(result[0], result[1])
             if final is not None:
                 return final
-        # 粘性凭证 CD/禁用/失效，清除指针换新
+            tried_emails.add(_sticky_email)
+        # 粘性凭证 CD/禁用/失效/不支持当前模型，清除指针换新
         _sticky_email = None
 
     # 通用随机选取（random 模式 / cache 未命中 / sticky 无可用粘性凭证）
     max_retries = 3
     for attempt in range(max_retries):
-        result = await database.get_next_available_credential(model_name=model_name)
+        result = await database.get_next_available_credential(
+            model_name=model_name,
+            exclude_emails=tried_emails,
+        )
 
         if not result:
             if attempt == 0:
@@ -91,6 +102,7 @@ async def get_valid_credential(
             return None
 
         email, credential_data = result
+        tried_emails.add(email)
 
         if await should_refresh_token(credential_data):
             log.debug(f"Token需要刷新: {email}")

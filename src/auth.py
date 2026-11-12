@@ -18,6 +18,7 @@ import oauthlib.oauth2.rfc6749.parameters
 from config import get_config_value, get_antigravity_api_url, get_panel_password
 from log import log
 
+from .api.antigravity import fetch_credential_models
 from .google_oauth_api import (
     Credentials,
     Flow,
@@ -383,12 +384,23 @@ async def _save_antigravity_credential(
         subscription_tier = "free"
         log.warning("无法从API获取订阅等级，tier 兜底为 free")
 
+    # 自动获取该凭证支持的模型列表
+    supported_models = []
+    try:
+        fetched_models = await fetch_credential_models(credentials.access_token)
+        if fetched_models is not None:
+            supported_models = fetched_models
+            log.info(f"成功获取凭证 {email} 支持的模型列表 ({len(supported_models)} 个)")
+    except Exception as e:
+        log.warning(f"获取凭证 {email} 模型列表失败: {e}")
+
     # 保存凭证（email 为唯一键，同邮箱自动覆盖去重）
     database = await get_database()
     creds_data = _prepare_credentials_data(
         credentials, project_id, subscription_tier=subscription_tier
     )
     creds_data["tier"] = subscription_tier
+    creds_data["supported_models"] = supported_models
     await database.store_credential(email, creds_data)
 
     # 创建默认状态记录
@@ -399,9 +411,10 @@ async def _save_antigravity_credential(
             "last_success": time.time(),
             "tier": subscription_tier,
             "project_id": project_id,
+            "supported_models": supported_models,
         }
         await database.update_credential_state(email, default_state)
-        log.info(f"凭证已保存: {email} (tier={subscription_tier})")
+        log.info(f"凭证已保存: {email} (tier={subscription_tier}, models={len(supported_models)})")
     except Exception as e:
         log.warning(f"创建默认状态记录失败 {email}: {e}")
 
