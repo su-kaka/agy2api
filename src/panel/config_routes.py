@@ -78,6 +78,8 @@ async def get_config(token: str = Depends(verify_panel_token)):
         # 服务器配置
         current_config["host"] = await config.get_server_host()
         current_config["port"] = await config.get_server_port()
+        current_config["ssl_certfile"] = await config.get_server_ssl_certfile() or ""
+        current_config["ssl_keyfile"] = await config.get_server_ssl_keyfile() or ""
         current_config["api_password"] = await config.get_api_password()
         current_config["panel_password"] = await config.get_panel_password()
 
@@ -257,6 +259,16 @@ async def save_config(request: ConfigSaveRequest, token: str = Depends(verify_pa
                 or new_config["port"] > 65535
             ):
                 raise HTTPException(status_code=400, detail="端口号必须是1-65535之间的整数")
+
+        for key in ("ssl_certfile", "ssl_keyfile"):
+            if key in new_config and not isinstance(new_config[key], str):
+                raise HTTPException(status_code=400, detail="SSL 证书与私钥路径必须是字符串")
+
+        # 只配一半会让 uvicorn 启动失败，保存时先拦住
+        if bool(str(new_config.get("ssl_certfile") or "").strip()) != bool(
+            str(new_config.get("ssl_keyfile") or "").strip()
+        ):
+            raise HTTPException(status_code=400, detail="SSL 证书与私钥必须同时填写，或同时留空")
 
         if "api_password" in new_config:
             if not isinstance(new_config["api_password"], str):

@@ -182,7 +182,9 @@ docker run -d --name agy2api --network host -e API_PASSWORD=api_pwd -e PANEL_PAS
 
 **基础配置**
 - `PORT`: 服务端口（默认：7861）
-- `HOST`: 服务器监听地址（默认：0.0.0.0）
+- `HOST`: 服务器监听地址（默认：0.0.0.0；监听 IPv6 填 `::`，`[::]` 亦可）
+- `SSL_CERTFILE`: HTTPS 证书文件路径，填含中间证书链的 fullchain 证书（如 `fullchain.pem`）；留空则为 HTTP
+- `SSL_KEYFILE`: HTTPS 私钥文件路径（如 `privkey.pem`），与 `SSL_CERTFILE` 同时填写才启用 HTTPS
 
 **密码配置**
 - `API_PASSWORD`: 聊天 API 访问密码（默认：pwd）
