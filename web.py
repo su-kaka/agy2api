@@ -3,6 +3,7 @@ Main Web Integration - Integrates all routers and modules
 集合router并开启主服务
 """
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 
@@ -11,7 +12,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
+import config
 from log import log
+from src.storage.database import close_database
 
 # Import managers and utilities
 # credential_manager 已重构为无状态函数模块（无需初始化/关闭）
@@ -218,18 +221,34 @@ if os.path.isdir("docs"):
     app.mount("/docs", StaticFiles(directory="docs"), name="docs")
 
 
+async def _listen_settings() -> tuple[str, int, str | None, str | None]:
+    """读取监听配置：环境变量 > 面板保存的配置 > 默认值"""
+    host = await config.get_server_host()
+    port = await config.get_server_port()
+    certfile = await config.get_server_ssl_certfile()
+    keyfile = await config.get_server_ssl_keyfile()
+    # 临时事件循环随即关闭，释放连接池，交由服务自身的事件循环重建
+    await close_database()
+    return host, port, certfile, keyfile
+
+
 def main():
     """主启动函数：uvicorn 直接运行 ASGI 应用"""
     import uvicorn
 
-    port = int(os.environ.get("PORT", 7861))
-    host = os.environ.get("HOST", "0.0.0.0")
+    host, port, certfile, keyfile = asyncio.run(_listen_settings())
     workers = int(os.environ.get("WORKERS", 1))
+    if keyfile and not certfile:
+        raise SystemExit("已配置 SSL_KEYFILE 但缺少 SSL_CERTFILE：启用 HTTPS 需要证书文件")
+    scheme = "https" if certfile else "http"
 
     log.info("=" * 60)
     log.info("启动 AGY2API")
     log.info("=" * 60)
-    log.info(f"控制面板: http://127.0.0.1:{port}")
+    log.info(f"监听地址: {scheme}://{host}:{port}")
+    if certfile:
+        log.info(f"SSL 证书: {certfile}（私钥: {keyfile or '证书内含私钥'}）")
+    log.info(f"控制面板: {scheme}://{'[::1]' if ':' in host else '127.0.0.1'}:{port}")
     if workers > 1:
         log.info(f"Worker 数量: {workers}")
     log.info("=" * 60)
@@ -238,6 +257,8 @@ def main():
         "web:app",
         host=host,
         port=port,
+        ssl_certfile=certfile,
+        ssl_keyfile=keyfile,
         workers=workers if workers > 1 else None,
         log_level="info",
     )

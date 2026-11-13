@@ -104,3 +104,6 @@ log.txt
 tools/
 aicode/
 streamchat/
+
+# CodeGraph 索引
+.codegraph/

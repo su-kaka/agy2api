@@ -51,6 +51,8 @@ ENV_MAPPINGS = {
     "CREDENTIAL_SELECT_MODE": "credential_select_mode",
     "HOST": "host",
     "PORT": "port",
+    "SSL_CERTFILE": "ssl_certfile",
+    "SSL_KEYFILE": "ssl_keyfile",
     "API_PASSWORD": "api_password",
     "PANEL_PASSWORD": "panel_password",
 }
@@ -228,7 +230,8 @@ async def get_server_host() -> str:
     Database config key: host
     Default: 0.0.0.0
     """
-    return str(await get_config_value("host", "0.0.0.0", "HOST"))
+    # uvicorn 的 host 参数要求裸 IPv6 地址，[::] / [::1] 这类 URL 写法要去掉方括号
+    return str(await get_config_value("host", "0.0.0.0", "HOST")).strip().strip("[]")
 
 
 async def get_server_port() -> int:
@@ -247,6 +250,30 @@ async def get_server_port() -> int:
             pass
 
     return int(await get_config_value("port", 7861))
+
+
+async def get_server_ssl_certfile() -> Optional[str]:
+    """
+    Get SSL certificate (fullchain) file path.
+
+    Environment variable: SSL_CERTFILE
+    Database config key: ssl_certfile
+    Default: None (不启用 HTTPS)
+    """
+    return str(await get_config_value("ssl_certfile", "", "SSL_CERTFILE")).strip() or None
+
+
+async def get_server_ssl_keyfile() -> Optional[str]:
+    """
+    Get SSL private key file path.
+
+    Environment variable: SSL_KEYFILE
+    Database config key: ssl_keyfile
+    Default: None
+
+    私钥通常与证书配对使用；若证书文件本身已包含私钥，可留空。
+    """
+    return str(await get_config_value("ssl_keyfile", "", "SSL_KEYFILE")).strip() or None
 
 
 async def get_api_password() -> str:

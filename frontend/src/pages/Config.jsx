@@ -95,8 +95,10 @@ const CONFIG_GROUPS = [
   {
     title: "服务器配置",
     fields: [
-      { key: "host", label: "服务器主机地址", type: "text", note: "服务器监听的主机地址，0.0.0.0表示监听所有接口（重启生效）" },
+      { key: "host", label: "服务器主机地址", type: "text", note: "服务器监听的主机地址，0.0.0.0 监听所有 IPv4 接口；监听 IPv6 填 ::（也可写 [::]）（重启生效）" },
       { key: "port", label: "服务器端口", type: "number", note: "服务器监听的端口号（重启生效）" },
+      { key: "ssl_certfile", label: "SSL 证书文件（fullchain）", type: "text", note: "填写后启用 HTTPS。指向含中间证书链的证书文件（如 Let's Encrypt 的 fullchain.pem），建议填绝对路径；留空则只用 HTTP（重启生效）", placeholder: "例如 /etc/letsencrypt/live/example.com/fullchain.pem" },
+      { key: "ssl_keyfile", label: "SSL 私钥文件", type: "text", note: "与证书匹配的私钥文件（如 privkey.pem），建议填绝对路径。证书文件已内含私钥时可留空（重启生效）", placeholder: "例如 /etc/letsencrypt/live/example.com/privkey.pem" },
       { key: "api_password", label: "API 访问密码", type: "text", note: "聊天API访问密码，用于 OpenAI / Gemini / Claude 端点认证" },
       { key: "panel_password", label: "控制面板密码", type: "text", note: "控制面板访问密码" },
     ],
