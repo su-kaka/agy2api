@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
+  Cpu,
   Download,
   Loader2,
   RefreshCw,
@@ -38,6 +39,8 @@ export default function Credentials() {
   // 额度预览相关状态
   const [quotaModal, setQuotaModal] = useState(null); // { email } 额度弹窗
   const [quotaCache, setQuotaCache] = useState({}); // 缓存额度数据 { email: { claude, gemini } | { error } }
+  // 支持模型弹窗状态
+  const [modelsModal, setModelsModal] = useState(null); // { email, models: [] }
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now() / 1000), 1000);
@@ -121,9 +124,12 @@ export default function Credentials() {
     try {
       const res = await api.post(`/creds/verify-project/${encodeURIComponent(email)}`);
       if (res.data.success) {
+        const modelCount = Array.isArray(res.data.supported_models)
+          ? res.data.supported_models.length
+          : 0;
         showMessage(
           "success",
-          `Project=${res.data.project_id}, Tier=${res.data.subscription_tier}`,
+          `Project=${res.data.project_id}, Tier=${res.data.subscription_tier}, 模型数=${modelCount}`,
           `检验成功: ${email}`
         );
       } else {
@@ -135,6 +141,28 @@ export default function Credentials() {
         "error",
         err.response?.data?.detail || err.response?.data?.error || err.response?.data?.message || "检验失败",
         `检验失败: ${email}`
+      );
+    } finally {
+      setBusy(email, false);
+    }
+  };
+
+  const refreshCredentialModels = async (email) => {
+    setBusy(email, true);
+    try {
+      const res = await api.post(`/creds/refresh-models/${encodeURIComponent(email)}`);
+      if (res.data.success) {
+        const newModels = res.data.supported_models || [];
+        setModelsModal((prev) =>
+          prev && prev.email === email ? { ...prev, models: newModels } : prev
+        );
+        fetchCreds();
+      }
+    } catch (err) {
+      showMessage(
+        "error",
+        err.response?.data?.detail || "刷新模型列表失败",
+        `刷新失败: ${email}`
       );
     } finally {
       setBusy(email, false);
@@ -478,6 +506,13 @@ export default function Credentials() {
               批量禁用
             </button>
             <button
+              onClick={() => doBatchAction("refresh_models")}
+              disabled={selected.size === 0 || busyFiles.has("__batch__")}
+              className="btn btn-secondary text-xs px-3 py-1.5 disabled:opacity-40"
+            >
+              批量刷新模型
+            </button>
+            <button
               onClick={() => doBatchAction("delete")}
               disabled={selected.size === 0 || busyFiles.has("__batch__")}
               className="btn btn-danger text-xs px-3 py-1.5 disabled:opacity-40"
@@ -566,11 +601,28 @@ export default function Credentials() {
                       </span>
                     )}
                   </div>
-                  <div className="flex items-center gap-1 text-gray-500">
-                    <Clock size={12} className="flex-shrink-0" />
-                    <span className="truncate" title={formatTime(cred.last_success)}>
-                      {formatTime(cred.last_success)}
-                    </span>
+                  <div className="flex items-center justify-between gap-2 text-gray-500">
+                    <div className="flex items-center gap-1 min-w-0">
+                      <Clock size={12} className="flex-shrink-0" />
+                      <span className="truncate" title={formatTime(cred.last_success)}>
+                        {formatTime(cred.last_success)}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() =>
+                        setModelsModal({
+                          email: cred.email,
+                          models: cred.supported_models || [],
+                        })
+                      }
+                      className="text-purple-400 hover:text-purple-300 flex items-center gap-1 flex-shrink-0"
+                      title="点击查看或刷新该凭证支持的模型列表"
+                    >
+                      <Cpu size={12} />
+                      {cred.supported_models?.length
+                        ? `模型 ${cred.supported_models.length}`
+                        : "模型未检测"}
+                    </button>
                   </div>
                 </div>
 
@@ -668,6 +720,55 @@ export default function Credentials() {
         </div>
       )}
 
+
+      {/* 支持模型列表弹窗 */}
+      {modelsModal && (
+        <Modal
+          type="info"
+          title={`支持模型列表 - ${modelsModal.email}`}
+          onClose={() => setModelsModal(null)}
+        >
+          <div className="space-y-3">
+            {busyFiles.has(modelsModal.email) ? (
+              <div className="flex items-center justify-center py-6 text-gray-500">
+                <RefreshCw size={16} className="animate-spin mr-2" />
+                正在获取模型列表...
+              </div>
+            ) : modelsModal.models?.length > 0 ? (
+              <div className="space-y-2">
+                <div className="text-xs text-gray-400">
+                  共支持 {modelsModal.models.length} 个模型：
+                </div>
+                <div className="flex flex-wrap gap-1.5 max-h-60 overflow-y-auto p-2 bg-dark-900/60 border border-dark-700 rounded-lg">
+                  {modelsModal.models.map((m) => (
+                    <span
+                      key={m}
+                      className="text-xs px-2 py-0.5 rounded bg-dark-700 text-gray-200 border border-dark-600 font-mono"
+                    >
+                      {m}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-4 text-gray-500 text-sm">
+                尚未记录该凭证的模型列表，请点击下方按钮检测。
+              </div>
+            )}
+            <button
+              onClick={() => refreshCredentialModels(modelsModal.email)}
+              disabled={busyFiles.has(modelsModal.email)}
+              className="w-full text-xs text-gray-300 hover:text-white py-2 rounded-lg bg-dark-700 hover:bg-dark-600 flex items-center justify-center gap-1.5 disabled:opacity-50"
+            >
+              <RefreshCw
+                size={12}
+                className={busyFiles.has(modelsModal.email) ? "animate-spin" : ""}
+              />
+              刷新模型列表
+            </button>
+          </div>
+        </Modal>
+      )}
 
       {/* 额度弹窗 */}
       {quotaModal && (

@@ -10,7 +10,7 @@ import time
 import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Callable, Tuple
+from typing import Any, Dict, List, Optional, Callable, Set, Tuple
 
 from fastapi import Response
 from config import (
@@ -25,9 +25,13 @@ from log import log
 from src.credential_manager import (
     add_credential,
     get_valid_credential,
+    refresh_token,
+    should_refresh_token,
+    update_credential_state,
 )
 from src.httpx_client import stream_post_async, post_async
 from src.models import Model, model_to_dict
+from src.storage.database import get_database
 from src.utils import ANTIGRAVITY_USER_AGENT
 from src.session_cache import derive_session_key
 from src.usage_log import (
@@ -386,16 +390,26 @@ async def stream_request(
     last_error_response = None  # 记录最后一次的错误响应
     last_error_body = ""  # 详细日志：最后一次的错误响应体
     next_cred_task = None  # 预热的下一个凭证任务
+    excluded_emails: Set[str] = {current_file} if current_file else set()
 
     # 内部函数：快速更新凭证(只更新token和project_id,避免重建整个请求)
-    async def refresh_credential_fast():
+    async def refresh_credential_fast(strict_exclude: bool = False):
         nonlocal current_file, access_token, auth_headers, project_id, final_payload
         cred_result = await get_valid_credential(
-            model_name=model_name, session_key=session_key
+            model_name=model_name,
+            session_key=session_key,
+            exclude_emails=excluded_emails,
         )
+        if not cred_result and not strict_exclude:
+            # 若排除已尝试凭证后无候选，退回不排除（例如仅有一个可用凭证时的普通重试）
+            cred_result = await get_valid_credential(
+                model_name=model_name, session_key=session_key
+            )
         if not cred_result:
             return None
         current_file, credential_data = cred_result
+        if current_file:
+            excluded_emails.add(current_file)
         access_token = credential_data.get("access_token") or credential_data.get("token")
         project_id = credential_data.get("project_id", "")
         if not access_token:
@@ -405,9 +419,14 @@ async def stream_request(
         final_payload["project"] = project_id
         return True
 
+    async def refresh_credential_fast_strict():
+        return await refresh_credential_fast(strict_exclude=True)
+
     def apply_cred_result(cred_result: Tuple[str, Dict[str, Any]]) -> bool:
         nonlocal current_file, access_token, project_id, auth_headers, final_payload
         current_file, credential_data = cred_result
+        if current_file:
+            excluded_emails.add(current_file)
         access_token = credential_data.get("access_token") or credential_data.get("token")
         project_id = credential_data.get("project_id", "")
         if not access_token or not project_id:
@@ -471,6 +490,31 @@ async def stream_request(
                         error_body = ""
                     last_error_body = error_body or ""
 
+                    # 404 模型不可用：立即更新该凭证的模型列表，并尝试切换到其他支持该模型的凭证重试
+                    if status_code == 404:
+                        log.warning(
+                            f"[ANTIGRAVITY STREAM] 模型 {model_name} 在凭证 {current_file} 上返回 404，更新凭证模型列表并尝试切换凭证"
+                        )
+                        await _handle_model_not_found_for_credential(current_file, model_name)
+                        await _log_stream_result(status_code, False, error_body[:500] or "HTTP 404")
+
+                        if attempt < max_retries:
+                            switched, next_cred_task = await _switch_credential_for_retry(
+                                next_cred_task=None,
+                                retry_interval=0.0,
+                                refresh_credential_fast=lambda: refresh_credential_fast_strict(),
+                                apply_cred_result=apply_cred_result,
+                                log_prefix="[ANTIGRAVITY STREAM]",
+                            )
+                            if switched:
+                                log.info(
+                                    f"[ANTIGRAVITY STREAM] 404 已切换至新凭证 {current_file} 重试 (attempt {attempt + 2}/{max_retries + 1})"
+                                )
+                                continue
+                        log.error(f"[ANTIGRAVITY STREAM] 无其他支持模型 {model_name} 的凭证，返回 404")
+                        yield chunk
+                        return
+
                     # 如果错误码是429、503或者在禁用码当中，做好记录后进行重试
                     if _is_retryable_status(status_code, DISABLE_ERROR_CODES):
                         log.warning(f"[ANTIGRAVITY STREAM] 流式请求失败 (status={status_code}), 凭证: {current_file}, 响应: {error_body[:500] if error_body else '无'}")
@@ -487,7 +531,9 @@ async def stream_request(
                         if next_cred_task is None and attempt < max_retries:
                             next_cred_task = asyncio.create_task(
                                 get_valid_credential(
-                                    model_name=model_name, session_key=session_key
+                                    model_name=model_name,
+                                    session_key=session_key,
+                                    exclude_emails=excluded_emails,
                                 )
                             )
 
@@ -741,16 +787,25 @@ async def non_stream_request(
     DISABLE_ERROR_CODES = await get_auto_ban_error_codes()  # 禁用凭证的错误码
     last_error_response = None  # 记录最后一次的错误响应
     next_cred_task = None  # 预热的下一个凭证任务
+    excluded_emails: Set[str] = {current_file} if current_file else set()
 
     # 内部函数：快速更新凭证(只更新token和project_id,避免重建整个请求)
-    async def refresh_credential_fast():
+    async def refresh_credential_fast(strict_exclude: bool = False):
         nonlocal current_file, access_token, auth_headers, project_id, final_payload
         cred_result = await get_valid_credential(
-            model_name=model_name, session_key=session_key
+            model_name=model_name,
+            session_key=session_key,
+            exclude_emails=excluded_emails,
         )
+        if not cred_result and not strict_exclude:
+            cred_result = await get_valid_credential(
+                model_name=model_name, session_key=session_key
+            )
         if not cred_result:
             return None
         current_file, credential_data = cred_result
+        if current_file:
+            excluded_emails.add(current_file)
         access_token = credential_data.get("access_token") or credential_data.get("token")
         project_id = credential_data.get("project_id", "")
         if not access_token:
@@ -760,9 +815,14 @@ async def non_stream_request(
         final_payload["project"] = project_id
         return True
 
+    async def refresh_credential_fast_strict():
+        return await refresh_credential_fast(strict_exclude=True)
+
     def apply_cred_result(cred_result: Tuple[str, Dict[str, Any]]) -> bool:
         nonlocal current_file, access_token, project_id, auth_headers, final_payload
         current_file, credential_data = cred_result
+        if current_file:
+            excluded_emails.add(current_file)
         access_token = credential_data.get("access_token") or credential_data.get("token")
         project_id = credential_data.get("project_id", "")
         if not access_token or not project_id:
@@ -833,6 +893,30 @@ async def non_stream_request(
                     pass
                 last_error_body = error_text
 
+                # 404 模型不可用：立即更新该凭证的模型列表，并尝试切换到其他支持该模型的凭证重试
+                if status_code == 404:
+                    log.warning(
+                        f"[ANTIGRAVITY] 模型 {model_name} 在凭证 {current_file} 上返回 404，更新凭证模型列表并尝试切换凭证"
+                    )
+                    await _handle_model_not_found_for_credential(current_file, model_name)
+                    await _log_result(status_code, False, error_message=error_text[:500] or "HTTP 404")
+
+                    if attempt < max_retries:
+                        switched, next_cred_task = await _switch_credential_for_retry(
+                            next_cred_task=None,
+                            retry_interval=0.0,
+                            refresh_credential_fast=refresh_credential_fast_strict,
+                            apply_cred_result=apply_cred_result,
+                            log_prefix="[ANTIGRAVITY]",
+                        )
+                        if switched:
+                            log.info(
+                                f"[ANTIGRAVITY] 404 已切换至新凭证 {current_file} 重试 (attempt {attempt + 2}/{max_retries + 1})"
+                            )
+                            continue
+                    log.error(f"[ANTIGRAVITY] 无其他支持模型 {model_name} 的凭证，返回 404")
+                    return last_error_response
+
                 if _is_retryable_status(status_code, DISABLE_ERROR_CODES):
                     log.warning(f"[ANTIGRAVITY] 非流式请求失败 (status={status_code}), 凭证: {current_file}, 响应: {error_text[:500] if error_text else '无'}")
 
@@ -848,7 +932,9 @@ async def non_stream_request(
                     if next_cred_task is None and attempt < max_retries:
                         next_cred_task = asyncio.create_task(
                                 get_valid_credential(
-                                    model_name=model_name, session_key=session_key
+                                    model_name=model_name,
+                                    session_key=session_key,
+                                    exclude_emails=excluded_emails,
                                 )
                             )
 
@@ -946,90 +1032,166 @@ def _is_listable_model(model_id: str) -> bool:
     return any(family in lowered for family in _MODEL_FAMILY_WHITELIST)
 
 
-async def fetch_available_models() -> List[Dict[str, Any]]:
+def _extract_model_ids_from_raw(data: Dict[str, Any]) -> List[str]:
+    """从上游 fetchAvailableModels 响应字典中提取并过滤模型 ID 列表（含衍生模型）"""
+    model_ids: List[str] = []
+    seen: Set[str] = set()
+    raw_models = data.get("models") if isinstance(data, dict) else None
+    if isinstance(raw_models, dict):
+        for model_id in raw_models.keys():
+            if not _is_listable_model(model_id):
+                continue
+            if model_id not in seen:
+                seen.add(model_id)
+                model_ids.append(model_id)
+
+        # 添加额外的 claude-sonnet-4-6-thinking 模型
+        if "claude-sonnet-4-6" in raw_models and "claude-sonnet-4-6-thinking" not in seen:
+            seen.add("claude-sonnet-4-6-thinking")
+            model_ids.append("claude-sonnet-4-6-thinking")
+
+        # 添加额外的 claude-opus-4-6 模型
+        if "claude-opus-4-6-thinking" in raw_models and "claude-opus-4-6" not in seen:
+            seen.add("claude-opus-4-6")
+            model_ids.append("claude-opus-4-6")
+
+    return model_ids
+
+
+async def fetch_credential_models(access_token: str) -> Optional[List[str]]:
     """
-    获取可用模型列表，返回符合 OpenAI API 规范的格式
-    过滤规则：名字带 disabled 的不返回；名字不含 claude/gemini/gpt/argon 的不返回
+    获取单个凭证支持的模型 ID 列表（经过白名单过滤并补全衍生模型）。
 
     Returns:
-        模型列表，格式为字典列表
-
-    Raises:
-        返回空列表如果获取失败
+        成功返回 List[str]，请求失败返回 None
     """
-    # 获取凭证管理器和可用凭证
-    cred_result = await get_valid_credential()
-    if not cred_result:
-        log.error("[ANTIGRAVITY] No valid credentials available for fetching models")
-        return []
-
-    current_file, credential_data = cred_result
-    access_token = credential_data.get("access_token") or credential_data.get("token")
-
     if not access_token:
-        log.error(f"[ANTIGRAVITY] No access token in credential: {current_file}")
-        return []
+        return None
 
-    # 构建请求头
     headers = build_antigravity_headers(access_token, model_name="agent")
-
     try:
-        # 使用 POST 请求获取模型列表
         response = await post_async(
             url=f"{await get_antigravity_api_url()}/v1internal:fetchAvailableModels",
-            json={},  # 空的请求体
-            headers=headers
+            json={},
+            headers=headers,
+            timeout=20.0,
         )
-
         if response.status_code == 200:
             data = response.json()
-            log.debug(f"[ANTIGRAVITY] Raw models response: {json.dumps(data, ensure_ascii=False)[:500]}")
+            return _extract_model_ids_from_raw(data)
+        log.warning(
+            f"[ANTIGRAVITY] fetch_credential_models failed ({response.status_code}): "
+            f"{response.text[:300]}"
+        )
+        return None
+    except Exception as e:
+        log.warning(f"[ANTIGRAVITY] fetch_credential_models exception: {e}")
+        return None
 
-            # 转换为 OpenAI 格式的模型列表，使用 Model 类
-            model_list = []
-            current_timestamp = int(datetime.now(timezone.utc).timestamp())
 
-            if 'models' in data and isinstance(data['models'], dict):
-                # 遍历模型字典（应用过滤规则）
-                for model_id in data['models'].keys():
-                    if not _is_listable_model(model_id):
-                        continue
-                    model = Model(
-                        id=model_id,
-                        object='model',
-                        created=current_timestamp,
-                        owned_by='google'
-                    )
-                    model_list.append(model_to_dict(model))
-            # 添加额外的 claude-sonnet-4-6-thinking 模型
-            if "claude-sonnet-4-6" in data.get('models', {}):
-                model = Model(
-                    id='claude-sonnet-4-6-thinking',
-                    object='model',
-                    created=current_timestamp,
-                    owned_by='google'
-                )
-                model_list.append(model_to_dict(model))
-            # 添加额外的 claude-opus-4-6 模型
-            if "claude-opus-4-6-thinking" in data.get('models', {}):
-                claude_opus_model = Model(
-                    id='claude-opus-4-6',
-                    object='model',
-                    created=current_timestamp,
-                    owned_by='google'
-                )
-                model_list.append(model_to_dict(claude_opus_model))
+async def refresh_credential_models(
+    email: str,
+    credential_data: Optional[Dict[str, Any]] = None,
+) -> Optional[List[str]]:
+    """
+    刷新指定凭证支持的模型列表并持久化到数据库。
 
-            log.info(f"[ANTIGRAVITY] Fetched {len(model_list)} available models")
-            return model_list
-        else:
-            log.error(f"[ANTIGRAVITY] Failed to fetch models ({response.status_code}): {response.text[:500]}")
+    Returns:
+        成功返回更新后的模型 ID 列表，失败返回 None
+    """
+    if not email:
+        return None
+    database = await get_database()
+    if credential_data is None:
+        credential_data = await database.get_credential(email)
+    if not credential_data:
+        return None
+
+    if await should_refresh_token(credential_data):
+        refreshed = await refresh_token(credential_data, email)
+        if not refreshed:
+            return None
+        credential_data = refreshed
+
+    access_token = credential_data.get("access_token") or credential_data.get("token")
+    if not access_token:
+        return None
+
+    models = await fetch_credential_models(access_token)
+    if models is not None:
+        await update_credential_state(email, {"supported_models": models})
+        log.info(f"[ANTIGRAVITY] 已更新凭证 {email} 支持的模型列表 ({len(models)} 个)")
+    return models
+
+
+async def _handle_model_not_found_for_credential(email: str, model_name: str) -> None:
+    """
+    当某凭证请求特定模型返回 404 时：
+    1. 立即从该凭证的 supported_models 中剔除该模型（如果已有记录）
+    2. 异步触发重新拉取该凭证的真实可用模型列表并落库
+    """
+    if not email:
+        return
+    try:
+        database = await get_database()
+        await database.remove_model_from_credential(email, model_name)
+    except Exception as e:
+        log.debug(f"[ANTIGRAVITY] 移除凭证模型失败 {email}: {e}")
+
+    asyncio.create_task(refresh_credential_models(email))
+
+
+async def fetch_available_models() -> List[Dict[str, Any]]:
+    """
+    获取所有可用凭证支持的模型并集，返回符合 OpenAI API 规范的格式。
+    - 优先汇总数据库中所有启用凭证的 supported_models 并集；
+    - 若存在尚未探测过模型列表的启用凭证，并发探测并写入数据库后再汇总；
+    - 若数据库并集仍为空，回退到使用单个可用凭证实时请求。
+    """
+    database = await get_database()
+    union_models, unprobed_emails = await database.get_enabled_credentials_models_info()
+
+    # 对尚未探测过模型列表的启用凭证进行并发探测（限制并发避免瞬时突发过多请求）
+    if unprobed_emails:
+        sem = asyncio.Semaphore(5)
+
+        async def _probe_one(target_email: str) -> Optional[List[str]]:
+            async with sem:
+                return await refresh_credential_models(target_email)
+
+        probe_Targets = unprobed_emails[:20]  # 单次最多探测 20 个未初始化凭证，防止阻塞过久
+        await asyncio.gather(*(_probe_one(e) for e in probe_Targets), return_exceptions=True)
+        union_models, _ = await database.get_enabled_credentials_models_info()
+
+    # 若仍为空（如所有凭证首次请求均失败），兜底用单个有效凭证请求一次
+    if not union_models:
+        cred_result = await get_valid_credential()
+        if not cred_result:
+            log.error("[ANTIGRAVITY] No valid credentials available for fetching models")
             return []
 
-    except Exception as e:
-        log.error(f"[ANTIGRAVITY] Failed to fetch models: {e}")
-        log.error(f"[ANTIGRAVITY] Traceback: {traceback.format_exc()}")
-        return []
+        current_file, credential_data = cred_result
+        models = await refresh_credential_models(current_file, credential_data)
+        if models:
+            union_models = models
+        else:
+            return []
+
+    current_timestamp = int(datetime.now(timezone.utc).timestamp())
+    model_list = [
+        model_to_dict(
+            Model(
+                id=model_id,
+                object="model",
+                created=current_timestamp,
+                owned_by="google",
+            )
+        )
+        for model_id in union_models
+    ]
+
+    log.info(f"[ANTIGRAVITY] Fetched {len(model_list)} available models (union across credentials)")
+    return model_list
 
 
 async def fetch_quota_info(access_token: str, project_id: str = "") -> Dict[str, Any]:
