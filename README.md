@@ -129,6 +129,7 @@ docker run -d --name agy2api --network host -e API_PASSWORD=api_pwd -e PANEL_PAS
 - 凭证导出（规范 JSON：refresh_token/access_token/expiry/email/tier/project_id）
 - 系统配置管理（环境变量锁定提示、热更新）
 - 批量凭证操作和状态筛选、批量导入（缺失字段自动获取）
+- RT 直接导入：在「批量导入 → RT 导入」中每行粘贴一条 Antigravity Refresh Token，自动去除空行、首尾空白和重复项，单次最多 100 条；导入时自动校验 RT 并获取账户信息
 - 移动端自适应
 
 ## 支持的模型
